@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from dataclasses import dataclass
-import time
-import threading
-import re
-import requests
 import json
+import logging
 import os
+import re
+import threading
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from telebot.types import CallbackQuery, InlineKeyboardMarkup as K, InlineKeyboardButton as B, Message
+import requests
+from telebot.types import CallbackQuery, Message
+from telebot.types import InlineKeyboardButton as B
+from telebot.types import InlineKeyboardMarkup as K
 
 if TYPE_CHECKING:
     from cardinal import Cardinal
@@ -19,19 +22,27 @@ VERSION = "1.0.0"
 
 DESCRIPTION = """Автоматический пересчет цен SMMWay.
 Округление происходит вниз.
-Т.е. если цена в лоте выше, чем цена на панели — все будет работать."""
+Т.е. если цена в лоте выше, чем цена на панели — все будет работать.
+команда для бота /smmsync"""
 
 CREDITS = "@sv1cid3"
 UUID = "a98d7dc2-54e6-47fe-87d9-509f87b1a0c7"
 SETTINGS_PAGE = False
+GITHUB = "https://github.com/uNoless/smmway_autosync"
 
-CONFIG_FILE = "smm_config.json"
+logger = logging.getLogger("FPC.smmway_autosync")
+
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "smm_config.json")
 DEFAULT_CONFIG = {
     "api_key": "",
     "multiplier": 1.5,
     "update_interval": 43200,
     "threshold": 0.1
 }
+
+_STATE_WAIT_MULT = f"{UUID}_wait_mult"
+_STATE_WAIT_KEY = f"{UUID}_wait_key"
+_STATE_WAIT_THRESHOLD = f"{UUID}_wait_threshold"
 
 SMM_ERROR_MESSAGES = {
     "user_inactive": "Аккаунт SMMWay заблокирован или не активирован. Проверьте профиль на сайте. (Не валид ключ)",
@@ -50,8 +61,6 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=3) 
-
-config = load_config()
 
 @dataclass
 class ParsedLot:
@@ -90,7 +99,7 @@ class SmmWayClient:
                         int(item["service"]): float(item["rate"])
                         for item in items
                         if "service" in item and "rate" in item
-                        }
+                    }
                 case _:
                     return {}
         except (requests.RequestException, ValueError):
@@ -128,8 +137,6 @@ def calculate_new_price(
         return new_price
     return None
 
-GITHUB = "https://github.com/uNoless/smmway_autosync"
-
 def send_alert(cardinal: Cardinal, text: str, chat_id: int | None = None, reply_markup=None):
     if chat_id:
         try:
@@ -143,6 +150,21 @@ def send_alert(cardinal: Cardinal, text: str, chat_id: int | None = None, reply_
         except Exception:
             pass
 
+def save_lot_with_retry(account, lot_id: int, new_price: float, max_attempts: int = 3) -> bool:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            fields = account.get_lot_fields(lot_id)
+            fields.price = new_price
+            fields.csrf_token = account.csrf_token
+            fields.renew_fields()
+            account.save_lot(fields)
+            return True
+        except Exception as e:
+            if attempt == max_attempts:
+                raise e
+            time.sleep(1.0 * attempt)
+    return False
+
 def sync_once(cardinal: Cardinal, chat_id: int | None = None):
     config = load_config()
     client = SmmWayClient(api_key=config["api_key"])
@@ -150,13 +172,11 @@ def sync_once(cardinal: Cardinal, chat_id: int | None = None):
         try:
             rates = client.get_rates()
         except SmmWayAPIError as e:
-
-            cardinal.logger.error(f"[{NAME}] Ошибка API SMMway: {e}")
+            logger.error(f"Ошибка API SMMway: {e}")
             send_alert(cardinal, f"⚠️ <b>{NAME}</b>: Ошибка API SMMWay:\n<code>{e}</code>", chat_id)
             return
         except Exception as e:
-
-            cardinal.logger.warning(f"[{NAME}] Сетевой сбой при запросе цен: {e}")
+            logger.warning(f"Сетевой сбой при запросе цен: {e}")
             send_alert(cardinal, f"[{NAME}] Сетевой сбой при запросе цен: {e}", chat_id)
             return
 
@@ -186,9 +206,8 @@ def sync_once(cardinal: Cardinal, chat_id: int | None = None):
                 time.sleep(0.75)
 
             except Exception as lot_err:
-                cardinal.logger.warning(f"[{NAME}] Ошибка обработки лота {fp_lot.id}: {lot_err}")
+                logger.warning(f"Ошибка обработки лота {fp_lot.id}: {lot_err}")
                 failed_lots.append(f"• Лот <code>#{fp_lot.id}</code>: {lot_err}")
-                
 
         msg = f"✅ <b>{NAME}</b>: Обход завершен!\nОбновлено лотов: <b>{updated_count}</b>"
 
@@ -202,62 +221,30 @@ def sync_once(cardinal: Cardinal, chat_id: int | None = None):
         send_alert(cardinal, msg, chat_id)
 
     except Exception as e:
-        cardinal.logger.error(f'[{NAME}] Критическая ошибка: {e}')
+        logger.error(f'Критическая ошибка: {e}')
         send_alert(cardinal, f'[{NAME}] Критическая ошибка: {e}', chat_id)
-    
-
-def save_lot_with_retry(account, lot_id: int, new_price: float, max_attempts: int = 3) -> bool:
-    for attempt in range(1, max_attempts + 1):
-        try:
-            fields = account.get_lot_fields(lot_id)
-            fields.price = new_price
-            fields.csrf_token = account.csrf_token
-            fields.renew_fields()
-            account.save_lot(fields)
-            return True
-        except Exception as e:
-            if attempt == max_attempts:
-                raise e
-            time.sleep(1.0 * attempt)
-    return False
 
 def updater_loop(cardinal: Cardinal):
     time.sleep(600)
     while True:
-        sync_once(cardinal,)
-        time.sleep(load_config().get("update_interval", 43200))
-
-def init(cardinal: Cardinal):
-    threading.Thread(target=updater_loop, args=(cardinal,), daemon=True).start()
-    
-    cardinal.telegram.msg_handler(
-        lambda m: send_settings_menu(m, cardinal),
-        commands=["smmsync", "smm", "smmway"]
-    )
-
-    cardinal.telegram.msg_handler(
-        lambda m: handle_msg(m, cardinal),
-        func=lambda m: bool(cardinal.telegram.get_state(m.chat.id, m.from_user.id))
-    )
-    
-    cardinal.telegram.cbq_handler(
-        lambda c: handle_callbacks(c, cardinal),
-        func=lambda c: c.data.startswith(f"{UUID}_")
-    )
+        cfg = load_config()
+        if cfg.get("api_key"):
+            sync_once(cardinal)
+        time.sleep(cfg.get("update_interval", 43200))
 
 
-def send_settings_menu(message, cardinal: Cardinal):
+def build_menu_text() -> str:
     config = load_config()
     key_preview = f"{config['api_key'][:6]}..." if config.get("api_key") else "<i>не задан</i>"
-    
-    text = (
-        f"⚙️ <b>SMMWay Price AutoSync</b>\n\n"
+    return (
+        f"⚙️ <b>{NAME}</b>\n\n"
         f"🔑 <b>API-ключ:</b> <code>{key_preview}</code>\n"
         f"💹 <b>Множитель:</b> <code>x{config.get('multiplier', 1.5)}</code>\n"
         f"🎯 <b>Порог:</b> <code>{config.get('threshold', 0.1)} ₽</code>\n"
         f"⏱ <b>Интервал:</b> <code>{config.get('update_interval', 43200)} сек.</code>"
     )
-    
+
+def build_menu_kb() -> K:
     kb = K()
     kb.row(
         B("🔑 Сменить ключ", callback_data=f"{UUID}_set_key"),
@@ -267,150 +254,222 @@ def send_settings_menu(message, cardinal: Cardinal):
         B("🎯 Порог (₽)", callback_data=f"{UUID}_set_threshold"),
         B("▶️ Запустить сейчас", callback_data=f"{UUID}_run_now")
     )
-    
-    cardinal.telegram.bot.send_message(
-        message.chat.id,
-        text,
-        parse_mode="HTML",
-        reply_markup=kb
-    )
+    return kb
+
+def build_cancel_kb() -> K:
+    return K().add(B("❌ Отмена", callback_data=f"{UUID}_cancel_state"))
 
 def handle_callbacks(c: CallbackQuery, cardinal: Cardinal):
-    if c.from_user.id not in cardinal.telegram.authorized_users:
+    tg = cardinal.telegram
+    bot = tg.bot
+    if c.from_user.id not in tg.authorized_users:
         return
+
     act = c.data.replace(f"{UUID}_", "")
     match act:
         case "run_now":
-            cardinal.telegram.bot.answer_callback_query(c.id, "Запуск обхода...")
-            threading.Thread(target=sync_once,args=(cardinal, c.message.chat.id), daemon=True).start()
+            bot.answer_callback_query(c.id, "Запуск обхода...")
+            threading.Thread(target=sync_once, args=(cardinal, c.message.chat.id), daemon=True).start()
 
         case "set_mult":
-            cardinal.telegram.bot.answer_callback_query(c.id)
-            cardinal.telegram.set_state(
-                chat_id=c.message.chat.id,
-                message_id=c.message.message_id,
-                user_id=c.from_user.id,
-                state=f'{UUID}_waiting_mult'
-            )
-
-            cancel_kb = K()
-            cancel_kb.add(B("❌ Отмена", callback_data=f"{UUID}_cancel_state"))
-            send_alert(cardinal, "✏️ Введите новый множитель (например, <code>1.8</code>):", chat_id=c.message.chat.id, reply_markup=cancel_kb)
-
-        case "cancel_state":
-
-            cardinal.telegram.bot.answer_callback_query(c.id, "Ввод отменен")
-            cardinal.telegram.clear_state(c.message.chat.id, c.from_user.id)
-            
-            config = load_config()
-            key_preview = f"{config['api_key'][:6]}..." if config.get("api_key") else "<i>не задан</i>"
-            text = (
-                f"⚙️ <b>SMMWay Price AutoSync</b>\n\n"
-                f"🔑 <b>API-ключ:</b> <code>{key_preview}</code>\n"
-                f"💹 <b>Множитель:</b> <code>x{config.get('multiplier', 1.5)}</code>\n"
-                f"🎯 <b>Порог:</b> <code>{config.get('threshold', 0.1)} ₽</code>\n"
-                f"⏱ <b>Интервал:</b> <code>{config.get('update_interval', 43200)} сек.</code>"
-            )
-            kb = K()
-            kb.row(
-                B("🔑 Сменить ключ", callback_data=f"{UUID}_set_key"),
-                B("💹 Множитель", callback_data=f"{UUID}_set_mult")
-            )
-            kb.row(
-                B("🎯 Порог (₽)", callback_data=f"{UUID}_set_threshold"),
-                B("▶️ Запустить сейчас", callback_data=f"{UUID}_run_now")
-            )
+            bot.answer_callback_query(c.id)
+            tg.set_state(c.message.chat.id, c.message.message_id, c.from_user.id, _STATE_WAIT_MULT, {})
             try:
-                cardinal.telegram.bot.edit_message_text(
-                    text,
-                    chat_id=c.message.chat.id,
-                    message_id=c.message.message_id,
-                    reply_markup=kb,
-                    parse_mode="HTML"
+                bot.edit_message_text(
+                    "✏️ <b>Введите новый множитель</b> (например, <code>1.8</code>):",
+                    c.message.chat.id,
+                    c.message.message_id,
+                    parse_mode="HTML",
+                    reply_markup=build_cancel_kb()
                 )
             except Exception:
                 pass
 
         case "set_key":
-            cardinal.telegram.bot.answer_callback_query(c.id)
-            cardinal.telegram.set_state(
-                chat_id=c.message.chat.id,
-                message_id=c.message.message_id,
-                user_id=c.from_user.id,
-                state=f'{UUID}_waiting_key'
-            )
-
-            cancel_kb = K()
-            cancel_kb.add(B("❌ Отмена", callback_data=f"{UUID}_cancel_state"))
-            send_alert(cardinal, "✏️ Введите API ключ:", chat_id=c.message.chat.id, reply_markup=cancel_kb)
+            bot.answer_callback_query(c.id)
+            tg.set_state(c.message.chat.id, c.message.message_id, c.from_user.id, _STATE_WAIT_KEY, {})
+            try:
+                bot.edit_message_text(
+                    "✏️ <b>Введите API-ключ SMMWay</b> (60 символов):",
+                    c.message.chat.id,
+                    c.message.message_id,
+                    parse_mode="HTML",
+                    reply_markup=build_cancel_kb()
+                )
+            except Exception:
+                pass
 
         case "set_threshold":
-            cardinal.telegram.bot.answer_callback_query(c.id)
-            cardinal.telegram.set_state(
-                chat_id=c.message.chat.id,
-                message_id=c.message.message_id,
-                user_id=c.from_user.id,
-                state=f'{UUID}_waiting_threshold'
-            )
+            bot.answer_callback_query(c.id)
+            tg.set_state(c.message.chat.id, c.message.message_id, c.from_user.id, _STATE_WAIT_THRESHOLD, {})
+            try:
+                bot.edit_message_text(
+                    "✏️ <b>Введите порог срабатывания в рублях</b> (например, <code>0.1</code>):",
+                    c.message.chat.id,
+                    c.message.message_id,
+                    parse_mode="HTML",
+                    reply_markup=build_cancel_kb()
+                )
+            except Exception:
+                pass
 
-            cancel_kb = K()
-            cancel_kb.add(B("❌ Отмена", callback_data=f"{UUID}_cancel_state"))
-            send_alert(cardinal, "✏️ Введите погрешность:", chat_id=c.message.chat.id, reply_markup=cancel_kb)
-            
+        case "cancel_state":
+            bot.answer_callback_query(c.id, "Отменено")
+            tg.clear_state(c.message.chat.id, c.from_user.id)
+            try:
+                bot.edit_message_text(
+                    build_menu_text(),
+                    c.message.chat.id,
+                    c.message.message_id,
+                    parse_mode="HTML",
+                    reply_markup=build_menu_kb()
+                )
+            except Exception:
+                pass
 
-def handle_msg(m: Message, cardinal: Cardinal):
-    if m.from_user.id not in cardinal.telegram.authorized_users:
+
+def on_mult_msg(m: Message, cardinal: Cardinal):
+    tg = cardinal.telegram
+    if not m.text:
+        return
+    raw = m.text.strip().replace(" ", "").replace(",", ".")
+    try:
+        val = float(raw)
+        if val <= 0:
+            raise ValueError
+    except ValueError:
+        tg.bot.reply_to(m, "⚠️ <b>Некорректное число!</b> Введите положительное число (например, <code>1.8</code>):", parse_mode="HTML")
         return
 
-    state = cardinal.telegram.get_state(m.chat.id, m.from_user.id)
-    if state == f"{UUID}_waiting_mult":
-        raw_text = m.text.strip().replace(",", ".")
-        try:
-            new_mult = float(raw_text)
-            if new_mult <= 0:
-                raise ValueError
-        except ValueError:
-            send_alert(cardinal, "⚠️ Некорректное число. Введите положительное число (например, <code>1.5</code>):",chat_id=m.chat.id)
-            return
+    cfg = load_config()
+    cfg["multiplier"] = val
+    save_config(cfg)
 
-        cfg = load_config()
-        cfg["multiplier"] = new_mult
-        save_config(cfg)
+    st = tg.get_state(m.chat.id, m.from_user.id) or {}
+    mid = st.get("mid") or st.get("message_id")
+    tg.clear_state(m.chat.id, m.from_user.id)
 
-        cardinal.telegram.clear_state(m.chat.id, m.from_user.id)
-        send_alert(cardinal, f"✅ Множитель успешно изменен на <b>x{new_mult}</b>!", chat_id=m.chat.id)
+    try:
+        tg.bot.delete_message(m.chat.id, m.message_id)
+        if mid:
+            tg.bot.edit_message_text(build_menu_text(), m.chat.id, mid, parse_mode="HTML", reply_markup=build_menu_kb())
+        else:
+            tg.bot.send_message(m.chat.id, build_menu_text(), parse_mode="HTML", reply_markup=build_menu_kb())
+    except Exception:
+        tg.bot.send_message(m.chat.id, build_menu_text(), parse_mode="HTML", reply_markup=build_menu_kb())
 
-    elif state == f"{UUID}_waiting_key":
-        key = m.text.strip()
-        if len(key) != 60:
-            send_alert(cardinal, '⚠️ Неверный ключ', chat_id=m.chat.id)
-            return
 
-        cfg = load_config()
-        cfg["api_key"] = key
-        save_config(cfg)
+def on_key_msg(m: Message, cardinal: Cardinal):
+    tg = cardinal.telegram
+    if not m.text:
+        return
+    key = m.text.strip()
     
-        cardinal.telegram.clear_state(m.chat.id, m.from_user.id)
-        send_alert(cardinal, "✅ Ключ успешно изменен!", chat_id=m.chat.id)
+    if len(key) != 60:
+        tg.bot.reply_to(
+            m,
+            f"⚠️ <b>Неверная длина API-ключа!</b>\n"
+            f"Вы ввели <b>{len(key)}</b> символов, а должно быть ровно <b>60</b>.\n"
+            f"Попробуйте ещё раз:",
+            parse_mode="HTML"
+        )
+        return
 
-    elif state == f'{UUID}_waiting_threshold':
-        raw_text = m.text.strip().replace(",", ".")
-        try:
-            new_thres = float(raw_text)
-            if new_thres <= 0:
-                raise ValueError
-        except ValueError:
-            send_alert(cardinal, "⚠️ Некорректное число. Введите положительное число (например, <code>0.1</code>):",chat_id=m.chat.id)
-            return
+    cfg = load_config()
+    cfg["api_key"] = key
+    save_config(cfg)
 
-        cfg = load_config()
-        cfg["threshold"] = new_thres
-        save_config(cfg)
+    st = tg.get_state(m.chat.id, m.from_user.id) or {}
+    mid = st.get("mid") or st.get("message_id")
+    tg.clear_state(m.chat.id, m.from_user.id)
 
-        cardinal.telegram.clear_state(m.chat.id, m.from_user.id)
-        send_alert(cardinal, f"✅ Погрешность успешно изменена на <b>x{new_thres}</b>!", chat_id=m.chat.id)
+    try:
+        tg.bot.delete_message(m.chat.id, m.message_id)
+        if mid:
+            tg.bot.edit_message_text(build_menu_text(), m.chat.id, mid, parse_mode="HTML", reply_markup=build_menu_kb())
+        else:
+            tg.bot.send_message(m.chat.id, build_menu_text(), parse_mode="HTML", reply_markup=build_menu_kb())
+    except Exception:
+        tg.bot.send_message(m.chat.id, build_menu_text(), parse_mode="HTML", reply_markup=build_menu_kb())
+
+
+def on_threshold_msg(m: Message, cardinal: Cardinal):
+    tg = cardinal.telegram
+    if not m.text:
+        return
+    raw = m.text.strip().replace(" ", "").replace(",", ".")
+    try:
+        val = float(raw)
+        if val <= 0:
+            raise ValueError
+    except ValueError:
+        tg.bot.reply_to(m, "⚠️ <b>Некорректное число!</b> Введите число порога в рублях (например, <code>0.1</code>):", parse_mode="HTML")
+        return
+
+    cfg = load_config()
+    cfg["threshold"] = val
+    save_config(cfg)
+
+    st = tg.get_state(m.chat.id, m.from_user.id) or {}
+    mid = st.get("mid") or st.get("message_id")
+    tg.clear_state(m.chat.id, m.from_user.id)
+
+    try:
+        tg.bot.delete_message(m.chat.id, m.message_id)
+        if mid:
+            tg.bot.edit_message_text(build_menu_text(), m.chat.id, mid, parse_mode="HTML", reply_markup=build_menu_kb())
+        else:
+            tg.bot.send_message(m.chat.id, build_menu_text(), parse_mode="HTML", reply_markup=build_menu_kb())
+    except Exception:
+        tg.bot.send_message(m.chat.id, build_menu_text(), parse_mode="HTML", reply_markup=build_menu_kb())
+
+
+def init(cardinal: Cardinal):
+    logger.info(f"🚀 {NAME} инициализация...")
+    logger.info(f"✨ Разработчик: {CREDITS} | Репозиторий: {GITHUB}")
+
+    threading.Thread(target=updater_loop, args=(cardinal,), daemon=True).start()
+
+    tg = cardinal.telegram
+
+    tg.add_command_to_menu("smmsync", "Настройки SMMWay Price AutoSync")
+    tg.add_command_to_menu("smm", "Быстрое меню SMMWay")
+
+    tg.msg_handler(
+        lambda m: tg.bot.send_message(m.chat.id, build_menu_text(), parse_mode="HTML", reply_markup=build_menu_kb()),
+        commands=["smmsync"]
+    )
+
+    tg.cbq_handler(
+        lambda c: handle_callbacks(c, cardinal),
+        func=lambda c: (c.data or "").startswith(f"{UUID}_")
+    )
+
+    tg.msg_handler(
+        lambda m: on_mult_msg(m, cardinal),
+        func=lambda m: m.content_type == "text"
+        and m.from_user.id in tg.authorized_users
+        and tg.check_state(m.chat.id, m.from_user.id, _STATE_WAIT_MULT)
+        and (not m.text or not m.text.strip().startswith("/")),
+    )
+
+    tg.msg_handler(
+        lambda m: on_key_msg(m, cardinal),
+        func=lambda m: m.content_type == "text"
+        and m.from_user.id in tg.authorized_users
+        and tg.check_state(m.chat.id, m.from_user.id, _STATE_WAIT_KEY)
+        and (not m.text or not m.text.strip().startswith("/")),
+    )
+
+    tg.msg_handler(
+        lambda m: on_threshold_msg(m, cardinal),
+        func=lambda m: m.content_type == "text"
+        and m.from_user.id in tg.authorized_users
+        and tg.check_state(m.chat.id, m.from_user.id, _STATE_WAIT_THRESHOLD)
+        and (not m.text or not m.text.strip().startswith("/")),
+    )
 
 
 BIND_TO_PRE_INIT = [init]
 BIND_TO_INIT = []
-BIND_TO_DELETE = ["smm_config.json"]
+BIND_TO_DELETE = ["CONFIG_FILE"]
