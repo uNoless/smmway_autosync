@@ -10,9 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import requests
-from telebot.types import CallbackQuery, Message
-from telebot.types import InlineKeyboardButton as B
-from telebot.types import InlineKeyboardMarkup as K
+from telebot.types import CallbackQuery, Message, InlineKeyboardButton as B, InlineKeyboardMarkup as K
 
 if TYPE_CHECKING:
     from cardinal import Cardinal
