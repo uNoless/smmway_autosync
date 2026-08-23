@@ -130,7 +130,7 @@ def calculate_new_price(
     mult = cfg.get("multiplier", 1.5)
     threshold = cfg.get("threshold", 0.1)
 
-    new_price = round((rate / 1000) * lot.amount * mult, 2)
+    new_price = round((rate / 1000) * lot.amount * mult, 4)
 
     if new_price - lot.current_price >= threshold:
         return new_price
