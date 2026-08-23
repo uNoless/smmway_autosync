@@ -21,7 +21,7 @@ DESCRIPTION = """Автоматический пересчет цен SMMWay.
 Округление происходит вниз.
 Т.е. если цена в лоте выше, чем цена на панели — все будет работать."""
 
-CREDITS = "@adefstar"
+CREDITS = "@sv1cid3"
 UUID = "a98d7dc2-54e6-47fe-87d9-509f87b1a0c7"
 SETTINGS_PAGE = True
 
@@ -128,7 +128,7 @@ def calculate_new_price(
         return new_price
     return None
 
-GITHUB = 
+GITHUB = "https://github.com/uNoless/smmway_autosync"
 
 def send_alert(cardinal: Cardinal, text: str, chat_id: int | None = None, reply_markup=None):
     if chat_id:
