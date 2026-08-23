@@ -23,7 +23,7 @@ DESCRIPTION = """Автоматический пересчет цен SMMWay.
 
 CREDITS = "@sv1cid3"
 UUID = "a98d7dc2-54e6-47fe-87d9-509f87b1a0c7"
-SETTINGS_PAGE = True
+SETTINGS_PAGE = False
 
 CONFIG_FILE = "smm_config.json"
 DEFAULT_CONFIG = {
@@ -179,7 +179,6 @@ def sync_once(cardinal: Cardinal, chat_id: int | None = None):
 
                 new_price = calculate_new_price(lot, rate, config)
 
-                # Если цена изменилась — сохраняем через retry:
                 if new_price is not None:
                     save_lot_with_retry(cardinal.account, fp_lot.id, new_price, max_attempts=3)
                     updated_count += 1
@@ -221,47 +220,60 @@ def save_lot_with_retry(account, lot_id: int, new_price: float, max_attempts: in
                 raise e
             time.sleep(1.0 * attempt)
     return False
+
 def updater_loop(cardinal: Cardinal):
+    time.sleep(600)
     while True:
         sync_once(cardinal,)
         time.sleep(load_config().get("update_interval", 43200))
 
-def init_price_checker(cardinal: Cardinal, *args):
+def init(cardinal: Cardinal):
     threading.Thread(target=updater_loop, args=(cardinal,), daemon=True).start()
-
-    cardinal.telegram.cbq_handler(
-        lambda c: open_settings(c, cardinal),
-        func=lambda c: c.data == UUID
+    
+    cardinal.telegram.msg_handler(
+        lambda m: send_settings_menu(m, cardinal),
+        commands=["smmsync", "smm", "smmway"]
     )
 
+    cardinal.telegram.msg_handler(
+        lambda m: handle_msg(m, cardinal),
+        func=lambda m: bool(cardinal.telegram.get_state(m.chat.id, m.from_user.id))
+    )
+    
     cardinal.telegram.cbq_handler(
         lambda c: handle_callbacks(c, cardinal),
         func=lambda c: c.data.startswith(f"{UUID}_")
     )
 
-    cardinal.telegram.bot.register_message_handler(
-        lambda msg: handle_msg(msg, cardinal),
-        content_types=["text"]
-    )
 
-    cardinal.logger.info(f"[{NAME}] Плагин успешно инициализирован.")
-
-def open_settings(c: CallbackQuery, cardinal: Cardinal):
+def send_settings_menu(message, cardinal: Cardinal):
     config = load_config()
+    key_preview = f"{config['api_key'][:6]}..." if config.get("api_key") else "<i>не задан</i>"
+    
     text = (
-        f"⚙️ <b>Настройки {NAME}</b>\n\n"
-        f"🔑 <b>API-ключ:</b> <code>{config['api_key'][:6]}...</code>\n"
-        f"💹 <b>Множитель:</b> <code>x{config['multiplier']}</code>\n"
-        f"⏱ <b>Интервал:</b> <code>{config['update_interval']} сек.</code>\n"
+        f"⚙️ <b>SMMWay Price AutoSync</b>\n\n"
+        f"🔑 <b>API-ключ:</b> <code>{key_preview}</code>\n"
+        f"💹 <b>Множитель:</b> <code>x{config.get('multiplier', 1.5)}</code>\n"
+        f"🎯 <b>Порог:</b> <code>{config.get('threshold', 0.1)} ₽</code>\n"
+        f"⏱ <b>Интервал:</b> <code>{config.get('update_interval', 43200)} сек.</code>"
     )
-    kb = K().row(
+    
+    kb = K()
+    kb.row(
         B("🔑 Сменить ключ", callback_data=f"{UUID}_set_key"),
-        B("💹 Множитель", callback_data=f"{UUID}_set_mult"),
-        B("🎯 Сменить погрешность", callback_data=f"{UUID}_set_threshold")
-    ).row(
+        B("💹 Множитель", callback_data=f"{UUID}_set_mult")
+    )
+    kb.row(
+        B("🎯 Порог (₽)", callback_data=f"{UUID}_set_threshold"),
         B("▶️ Запустить сейчас", callback_data=f"{UUID}_run_now")
     )
-    cardinal.telegram.bot.edit_message_text(text, c.message.chat.id, c.message.id, reply_markup=kb, parse_mode="HTML")
+    
+    cardinal.telegram.bot.send_message(
+        message.chat.id,
+        text,
+        parse_mode="HTML",
+        reply_markup=kb
+    )
 
 def handle_callbacks(c: CallbackQuery, cardinal: Cardinal):
     if c.from_user.id not in cardinal.telegram.authorized_users:
@@ -286,9 +298,38 @@ def handle_callbacks(c: CallbackQuery, cardinal: Cardinal):
             send_alert(cardinal, "✏️ Введите новый множитель (например, <code>1.8</code>):", chat_id=c.message.chat.id, reply_markup=cancel_kb)
 
         case "cancel_state":
-            cardinal.telegram.bot.answer_callback_query(c.id, "Отменено")
+
+            cardinal.telegram.bot.answer_callback_query(c.id, "Ввод отменен")
             cardinal.telegram.clear_state(c.message.chat.id, c.from_user.id)
-            open_settings(c, cardinal)
+            
+            config = load_config()
+            key_preview = f"{config['api_key'][:6]}..." if config.get("api_key") else "<i>не задан</i>"
+            text = (
+                f"⚙️ <b>SMMWay Price AutoSync</b>\n\n"
+                f"🔑 <b>API-ключ:</b> <code>{key_preview}</code>\n"
+                f"💹 <b>Множитель:</b> <code>x{config.get('multiplier', 1.5)}</code>\n"
+                f"🎯 <b>Порог:</b> <code>{config.get('threshold', 0.1)} ₽</code>\n"
+                f"⏱ <b>Интервал:</b> <code>{config.get('update_interval', 43200)} сек.</code>"
+            )
+            kb = K()
+            kb.row(
+                B("🔑 Сменить ключ", callback_data=f"{UUID}_set_key"),
+                B("💹 Множитель", callback_data=f"{UUID}_set_mult")
+            )
+            kb.row(
+                B("🎯 Порог (₽)", callback_data=f"{UUID}_set_threshold"),
+                B("▶️ Запустить сейчас", callback_data=f"{UUID}_run_now")
+            )
+            try:
+                cardinal.telegram.bot.edit_message_text(
+                    text,
+                    chat_id=c.message.chat.id,
+                    message_id=c.message.message_id,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
 
         case "set_key":
             cardinal.telegram.bot.answer_callback_query(c.id)
@@ -370,5 +411,6 @@ def handle_msg(m: Message, cardinal: Cardinal):
         send_alert(cardinal, f"✅ Погрешность успешно изменена на <b>x{new_thres}</b>!", chat_id=m.chat.id)
 
 
-BIND_TO_INIT = [init_price_checker]
+BIND_TO_PRE_INIT = [init]
+BIND_TO_INIT = []
 BIND_TO_DELETE = ["smm_config.json"]
