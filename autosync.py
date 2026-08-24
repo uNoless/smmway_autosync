@@ -231,9 +231,6 @@ def updater_loop(cardinal: Cardinal):
             sync_once(cardinal)
         time.sleep(cfg.get("update_interval", 43200))
 
-
-# ===================== ТЕЛЕГРАМ МЕНЮ И ШАГИ =====================
-
 def send_settings_menu(message, cardinal: Cardinal):
     cfg = load_config()
     key_preview = f"{cfg['api_key'][:6]}..." if cfg.get("api_key") else "<i>не задан</i>"
