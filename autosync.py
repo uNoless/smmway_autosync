@@ -227,12 +227,19 @@ def sync_once(cardinal: Cardinal, chat_id: int | None = None):
         logger.error(f'Критическая ошибка: {e}')
         send_alert(cardinal, f'[{NAME}] Критическая ошибка: {e}', chat_id)
 
+sync_active_event = threading.Event()
+if config.get("enabled", False):
+    sync_active_event.set()
+
 def updater_loop(cardinal: Cardinal):
     time.sleep(600)
     while True:
+        sync_active_event.wait()
+        
         cfg = load_config()
-        if cfg.get("enabled", False) and cfg.get("api_key"):
+        if cfg.get("api_key"):
             sync_once(cardinal)
+            
         time.sleep(cfg.get("update_interval", 43200))
 
 def build_settings_menu() -> tuple[str, K]:
@@ -362,6 +369,12 @@ def init(cardinal: Cardinal):
                 cfg = load_config()
                 cfg["enabled"] = not cfg.get("enabled", False)
                 save_config(cfg)
+                
+                if cfg["enabled"]:
+                    sync_active_event.set()
+                else:
+                    sync_active_event.clear()
+                
                 status_msg = "Автосинхронизация ВКЛЮЧЕНА 🟢" if cfg["enabled"] else "Автосинхронизация ВЫКЛЮЧЕНА 🔴"
                 bot.answer_callback_query(c.id, status_msg)
                 text, kb = build_settings_menu()
