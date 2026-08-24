@@ -32,6 +32,7 @@ logger = logging.getLogger("FPC.smmway_autosync")
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "smm_config.json")
 DEFAULT_CONFIG = {
+    "enabled": False,
     "api_key": "",
     "multiplier": 1.5,
     "update_interval": 43200,
@@ -51,7 +52,10 @@ def load_config() -> dict:
         return DEFAULT_CONFIG
     try:
         with open(CONFIG_FILE, "r", encoding='utf-8') as f:
-            return json.load(f)
+            cfg = json.load(f)
+            if "enabled" not in cfg:
+                cfg["enabled"] = False
+            return cfg
     except Exception:
         return DEFAULT_CONFIG
 
@@ -227,23 +231,29 @@ def updater_loop(cardinal: Cardinal):
     time.sleep(600)
     while True:
         cfg = load_config()
-        if cfg.get("api_key"):
+        if cfg.get("enabled", False) and cfg.get("api_key"):
             sync_once(cardinal)
         time.sleep(cfg.get("update_interval", 43200))
 
-def send_settings_menu(message, cardinal: Cardinal):
+def build_settings_menu() -> tuple[str, K]:
     cfg = load_config()
     key_preview = f"{cfg['api_key'][:6]}..." if cfg.get("api_key") else "<i>не задан</i>"
+    is_enabled = bool(cfg.get("enabled", False))
+    status_text = "🟢 <b>ВКЛЮЧЕНА</b>" if is_enabled else "🔴 <b>ВЫКЛЮЧЕНА</b>"
     
     text = (
         f"⚙️ <b>{NAME}</b>\n\n"
+        f"📊 <b>Статус автосинхронизации:</b> {status_text}\n"
         f"🔑 <b>API-ключ:</b> <code>{key_preview}</code>\n"
         f"💹 <b>Множитель:</b> <code>x{cfg.get('multiplier', 1.5)}</code>\n"
         f"🎯 <b>Порог:</b> <code>{cfg.get('threshold', 0.1)} ₽</code>\n"
         f"⏱ <b>Интервал:</b> <code>{cfg.get('update_interval', 43200)} сек.</code>"
     )
     
+    toggle_btn_text = "🔴 Выключить автосинк" if is_enabled else "🟢 Включить автосинк"
+    
     kb = K()
+    kb.row(B(toggle_btn_text, callback_data=f"{UUID}_toggle_enabled"))
     kb.row(
         B("🔑 Сменить ключ", callback_data=f"{UUID}_set_key"),
         B("💹 Множитель", callback_data=f"{UUID}_set_mult")
@@ -252,7 +262,10 @@ def send_settings_menu(message, cardinal: Cardinal):
         B("🎯 Порог (₽)", callback_data=f"{UUID}_set_threshold"),
         B("▶️ Запустить сейчас", callback_data=f"{UUID}_run_now")
     )
-    
+    return text, kb
+
+def send_settings_menu(message, cardinal: Cardinal):
+    text, kb = build_settings_menu()
     bot.send_message(
         message.chat.id,
         text,
@@ -345,6 +358,24 @@ def init(cardinal: Cardinal):
         
         act = c.data.replace(f"{UUID}_", "")
         match act:
+            case "toggle_enabled":
+                cfg = load_config()
+                cfg["enabled"] = not cfg.get("enabled", False)
+                save_config(cfg)
+                status_msg = "Автосинхронизация ВКЛЮЧЕНА 🟢" if cfg["enabled"] else "Автосинхронизация ВЫКЛЮЧЕНА 🔴"
+                bot.answer_callback_query(c.id, status_msg)
+                text, kb = build_settings_menu()
+                try:
+                    bot.edit_message_text(
+                        text,
+                        chat_id=c.message.chat.id,
+                        message_id=c.message.message_id,
+                        parse_mode="HTML",
+                        reply_markup=kb
+                    )
+                except Exception:
+                    pass
+
             case "run_now":
                 bot.answer_callback_query(c.id, "Запуск обхода...")
                 threading.Thread(target=sync_once, args=(cardinal, c.message.chat.id), daemon=True).start()
