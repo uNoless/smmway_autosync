@@ -108,23 +108,27 @@ class SmmWayClient:
         except (requests.RequestException, ValueError):
             return {}
 
-def parse_lot(lot_id: int, description: str | None, price: float) -> ParsedLot | None:
-    dct = dict(re.findall(r'(\w+):\s*([^\n\r]+)', description or ""))
+def parse_lot(lot_id: int, description: str | None, price: float) -> tuple[ParsedLot | None, str | None]:
+    raw = re.findall(r'(\w+):\s*([^\n\r]+)', description or "")
+    dct = {k.strip().lower(): v.strip().lower() for k, v in raw}
+
     match dct:
-        case {"smm": "on", "id": raw_id} if dct.get("name", "way") == "way":
-            try:
-                return ParsedLot(
-                    lot_id=lot_id,
-                    service_id=int(raw_id),
-                    amount=int(dct.get("am", 1)),
-                    current_price=price,
-                )
-            except (ValueError, TypeError):
-                raise ValueError("В Id или Am не указаны цифры")
+        case {"smm": "on", "id": raw_id, **rest} if rest.get("name", "way") == "way" and raw_id.isdigit():
+            am_val = rest.get("am", "1")
+            match am_val.isdigit():
+                case True:
+                    return ParsedLot(lot_id=lot_id, service_id=int(raw_id), amount=int(am_val), current_price=price), None
+                case False:
+                    return None, f"в am указано не число: <code>{am_val}</code>"
+
+        case {"smm": "on", "id": raw_id}:
+            return None, f"в id указано не число: <code>{raw_id}</code>"
+
         case {"smm": "on"}:
-            raise ValueError("Указан smm: on, но нет id или name не way")
+            return None, "указан <code>smm: on</code>, но отсутствует параметр <code>id</code>"
+
         case _:
-            return None
+            return None, None
 
 def calculate_new_price(
         lot: ParsedLot,
@@ -191,25 +195,35 @@ def sync_once(cardinal: Cardinal, chat_id: int | None = None):
         for fp_lot in cardinal.tg_profile.get_common_lots():
             try:
                 fields = cardinal.account.get_lot_fields(fp_lot.id)
-                lot = parse_lot(fp_lot.id, fields.description_ru, float(fields.price))
-
-                if not lot:
-                    continue
-
-                rate = rates.get(lot.service_id)
-                if not rate:
-                    continue
-
-                new_price = calculate_new_price(lot, rate, cfg)
-
-                if new_price is not None:
-                    save_lot_with_retry(cardinal.account, fp_lot.id, new_price, max_attempts=3)
-                    updated_count += 1
+                
+                match parse_lot(fp_lot.id, fields.description_ru, float(fields.price)):
+                
+                    case _, str() as err:
+                        failed_lots.append(f"• Лот <code>#{fp_lot.id}</code>: {err}")
+                        continue
+                        
+                    case None, None:
+                        continue
+                    
+                    case ParsedLot() as lot, None:
+                        match rates.get(lot.service_id):
+                            case None:
+                                failed_lots.append(
+                                    f"• Лот <code>#{fp_lot.id}</code>: ID услуги <code>{lot.service_id}</code> отсутствует в API панельки!"
+                                )
+                                continue
+                            case rate:
+                                new_price = calculate_new_price(lot, rate, cfg)
+                                match new_price:
+                                    case float() | int():
+                                        save_lot_with_retry(cardinal.account, fp_lot.id, new_price, max_attempts=3)
+                                        updated_count += 1
+                                    case _:
+                                        pass
 
                 time.sleep(0.75)
 
             except Exception as lot_err:
-                logger.warning(f"Ошибка обработки лота {fp_lot.id}: {lot_err}")
                 failed_lots.append(f"• Лот <code>#{fp_lot.id}</code>: {lot_err}")
 
         msg = f"✅ <b>{NAME}</b>: Обход завершен!\nОбновлено лотов: <b>{updated_count}</b>"
