@@ -113,19 +113,28 @@ def parse_lot(lot_id: int, description: str | None, price: float) -> tuple[Parse
     dct = {k.strip().lower(): v.strip().lower() for k, v in raw}
 
     match dct:
-        case {"smm": "on", "id": raw_id, **rest} if rest.get("name", "way") == "way" and raw_id.isdigit():
-            am_val = rest.get("am", "1")
-            match am_val.isdigit():
+        case {"smm": "on", "id": raw_id, **rest} if rest.get("name", "way") == "way":
+            match raw_id.isdigit():
                 case True:
-                    return ParsedLot(lot_id=lot_id, service_id=int(raw_id), amount=int(am_val), current_price=price), None
+                    am_val = rest.get("am", "1")
+                    match am_val.isdigit():
+                        case True:
+                            return ParsedLot(lot_id=lot_id, service_id=int(raw_id), amount=int(am_val), current_price=price), None
+                        
+                        case False:
+                            return None, f"в am указано не число: <code>{am_val}</code>"
+                    
                 case False:
-                    return None, f"в am указано не число: <code>{am_val}</code>"
+                    return None, f"в id указано не число: <code>{raw_id}</code>"
 
-        case {"smm": "on", "id": raw_id}:
-            return None, f"в id указано не число: <code>{raw_id}</code>"
+        case {"smm": "on", **rest} if rest.get("name") != "way":
+            return None, None
 
         case {"smm": "on"}:
             return None, "указан <code>smm: on</code>, но отсутствует параметр <code>id</code>"
+
+        case {"id": raw_id} if raw_id.isdigit():
+            return None, f"найден ID <code>{raw_id}</code>, но не указан <code>smm: on</code>"
 
         case _:
             return None, None
@@ -197,7 +206,6 @@ def sync_once(cardinal: Cardinal, chat_id: int | None = None):
                 fields = cardinal.account.get_lot_fields(fp_lot.id)
                 
                 match parse_lot(fp_lot.id, fields.description_ru, float(fields.price)):
-                
                     case _, str() as err:
                         failed_lots.append(f"• Лот <code>#{fp_lot.id}</code>: {err}")
                         continue
@@ -206,19 +214,19 @@ def sync_once(cardinal: Cardinal, chat_id: int | None = None):
                         continue
                     
                     case ParsedLot() as lot, None:
-                        match rates.get(lot.service_id):
-                            case None:
+                        match lot.service_id in rates:
+                            case False:
                                 failed_lots.append(
                                     f"• Лот <code>#{fp_lot.id}</code>: ID услуги <code>{lot.service_id}</code> отсутствует в API панельки!"
                                 )
                                 continue
-                            case rate:
-                                new_price = calculate_new_price(lot, rate, cfg)
-                                match new_price:
-                                    case float() | int():
+                            case True:
+                                rate = rates[lot.service_id]
+                                match calculate_new_price(lot, rate, cfg):
+                                    case float() as new_price:
                                         save_lot_with_retry(cardinal.account, fp_lot.id, new_price, max_attempts=3)
                                         updated_count += 1
-                                    case _:
+                                    case None:
                                         pass
 
                 time.sleep(0.75)
