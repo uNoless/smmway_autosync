@@ -111,9 +111,7 @@ class SmmWayClient:
 def parse_lot(lot_id: int, description: str | None, price: float) -> ParsedLot | None:
     dct = dict(re.findall(r'(\w+):\s*([^\n\r]+)', description or ""))
     match dct:
-        case {"smm": "on", "id": raw_id}:
-            if dct.get("name", "way") != "way":
-                return None
+        case {"smm": "on", "id": raw_id} if dct.get("name", "way") == "way":
             try:
                 return ParsedLot(
                     lot_id=lot_id,
@@ -122,7 +120,9 @@ def parse_lot(lot_id: int, description: str | None, price: float) -> ParsedLot |
                     current_price=price,
                 )
             except (ValueError, TypeError):
-                return None
+                raise ValueError("В Id или Am не указаны цифры")
+        case {"smm": "on"}:
+            raise ValueError("Указан smm: on, но нет id или name не way")
         case _:
             return None
 
