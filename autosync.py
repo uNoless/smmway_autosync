@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from cardinal import Cardinal
 
 NAME = "SMMWay Price AutoSync"
-VERSION = "1.1.0"
+VERSION = "1.0.0"
 
 DESCRIPTION = """Автоматический пересчет цен SMMWay.
 Округление происходит вниз.
@@ -166,14 +166,14 @@ def send_alert(cardinal: Cardinal, text: str, chat_id: int | None = None, reply_
         except Exception:
             pass
 
-def save_lot_with_retry(account, lot_id: int, new_price: float, max_attempts: int = 3) -> bool:
+def save_lot_with_retry(cardinal: Cardinal, lot_id: int, new_price: float, max_attempts: int = 3) -> bool:
     for attempt in range(1, max_attempts + 1):
         try:
-            fields = account.get_lot_fields(lot_id)
+            fields = cardinal.account.get_lot_fields(lot_id)
             fields.price = new_price
-            fields.csrf_token = account.csrf_token
+            fields.csrf_token = cardinal.account.csrf_token
             fields.renew_fields()
-            account.save_lot(fields)
+            cardinal.account.save_lot(fields)
             return True
         except Exception as e:
             if attempt == max_attempts:
@@ -249,30 +249,20 @@ def sync_once(cardinal: Cardinal, chat_id: int | None = None):
         logger.error(f'Критическая ошибка: {e}')
         send_alert(cardinal, f'[{NAME}] Критическая ошибка: {e}', chat_id)
 
-stop_event = threading.Event()
 sync_active_event = threading.Event()
 if config.get("enabled", False):
     sync_active_event.set()
 
 def updater_loop(cardinal: Cardinal):
-    if stop_event.wait(600):
-        return
-    while not stop_event.is_set():
+    time.sleep(600)
+    while True:
         sync_active_event.wait()
-        if stop_event.is_set():
-            break
         
         cfg = load_config()
         if cfg.get("api_key"):
             sync_once(cardinal)
             
-        if stop_event.wait(cfg.get("update_interval", 43200)):
-            break
-
-def on_unload():
-    stop_event.set()
-    sync_active_event.set()
-    logger.info(f"{NAME} выгружен, поток остановлен")
+        time.sleep(cfg.get("update_interval", 43200))
 
 def build_settings_menu() -> tuple[str, K]:
     cfg = load_config()
@@ -446,4 +436,4 @@ def init(cardinal: Cardinal):
 
 BIND_TO_PRE_INIT = [init]
 BIND_TO_INIT = []
-BIND_TO_DELETE = [on_unload]
+BIND_TO_DELETE = [CONFIG_FILE]
